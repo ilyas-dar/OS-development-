@@ -2,60 +2,102 @@
 #include <stdarg.h>
 #include "idt.h"
 
-/* ---------- VGA ---------- */
+/*
+ *  VGA TEXT MODE SETUP
+ * ============================
+ * We are living in 80x25 land.
+ * No graphics yet, just vibes.
+ */
 
 #define VGA_WIDTH   80
 #define VGA_HEIGHT  25
+
+// height of the big shiny logo at the top
 #define LOGO_HEIGHT 7
+
+// everything below the logo is scrollable
 #define SCROLL_START LOGO_HEIGHT
 #define SCROLL_END   (VGA_HEIGHT - 1)
 
+// pack fg + bg into one VGA color byte
 #define VGA_COLOR(fg, bg) ((uint8_t)(((bg) << 4) | (fg)))
 
+// magic VGA memory address (don’t touch unless you like chaos)
 static uint16_t* const VGA = (uint16_t*)0xB8000;
 
+// current cursor position
 static uint8_t row = 0;
 static uint8_t col = 0;
+
+// remember where user input starts (so backspace doesn’t eat the prompt)
 static uint8_t input_row = 0;
 static uint8_t input_col = 0;
+
+// default color: white on black (classic terminal look)
 static uint8_t color = VGA_COLOR(0xF, 0x0);
 
+// shell prompt (feels official)
 static const char* PROMPT = "RetroOS> ";
 
-/* ---------- command buffer ---------- */
+/*
+ *  COMMAND BUFFER
+ * ============================
+ * Where typed commands live
+ * until user hits Enter.
+ */
 
 #define CMD_BUF_SIZE 64
 char cmd_buf[CMD_BUF_SIZE];
 uint8_t cmd_len = 0;
 
-/* ---------- I/O ---------- */
+/*
+ * ============================
+ *  PORT I/O
+ * Talking directly to hardware.
+ * No safety nets here.
+ */
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-/* ---------- cursor ---------- */
+/*
+ *  CURSOR HANDLING
+ * ============================
+ * Makes the blinking cursor
+ * follow our software cursor.
+ */
 
 static void update_cursor(void) {
     uint16_t pos = row * VGA_WIDTH + col;
+
+    // tell VGA we’re updating cursor position
     outb(0x3D4, 0x0F);
     outb(0x3D5, pos & 0xFF);
     outb(0x3D4, 0x0E);
     outb(0x3D5, (pos >> 8) & 0xFF);
 }
 
-/* ---------- color ---------- */
+/*
+ *  COLOR CONTROL
+ * Simple now, fancy later.
+ */
 
 void set_color(uint8_t fg, uint8_t bg) {
     color = VGA_COLOR(fg, bg);
 }
 
-/* ---------- scroll ---------- */
+/*
+ *  SCROLLING LOGIC
+ * Only scroll the console area.
+ * Logo stays sacred.
+ */
 
 static void scroll_if_needed(void) {
     if (row < SCROLL_END)
-        return;
+        return; // still room, chill
 
+    // shift everything up by one line
     for (int y = SCROLL_START; y < SCROLL_END; y++) {
         for (int x = 0; x < VGA_WIDTH; x++) {
             VGA[y * VGA_WIDTH + x] =
@@ -63,6 +105,7 @@ static void scroll_if_needed(void) {
         }
     }
 
+    // clear last line after scroll
     for (int x = 0; x < VGA_WIDTH; x++) {
         VGA[SCROLL_END * VGA_WIDTH + x] =
             ((uint16_t)color << 8) | ' ';
@@ -71,10 +114,14 @@ static void scroll_if_needed(void) {
     row = SCROLL_END;
 }
 
-/* ---------- prompt ---------- */
+/*
+ *  PROMPT
+ * Prints "RetroOS> " and
+ * remembers where input begins.
+ */
 
 void print_prompt(void) {
-    set_color(0xA, 0x0);
+    set_color(0xA, 0x0); // green prompt = hacker energy
 
     for (const char* p = PROMPT; *p; p++) {
         VGA[row * VGA_WIDTH + col] =
@@ -82,16 +129,23 @@ void print_prompt(void) {
         col++;
     }
 
-    set_color(0xF, 0x0);
+    set_color(0xF, 0x0); // back to normal text
 
     input_row = row;
     input_col = col;
+
     update_cursor();
 }
 
-/* ---------- backspace ---------- */
+/*
+ *  BACKSPACE
+ * ============================
+ * Deletes characters, but
+ * NEVER the prompt itself.
+ */
 
 void backspace(void) {
+    // don’t let backspace cross the prompt boundary
     if (row < input_row ||
        (row == input_row && col <= input_col))
         return;
@@ -109,7 +163,12 @@ void backspace(void) {
     update_cursor();
 }
 
-/* ---------- putchar ---------- */
+/*
+ *  PUTCHAR
+ * ============================
+ * The heart of all output.
+ * Everything ends up here.
+ */
 
 void putchar(char c) {
     if (c == '\b') {
@@ -139,10 +198,13 @@ void putchar(char c) {
     update_cursor();
 }
 
-/* ---------- printing ---------- */
+/*
+ *  BASIC PRINTING
+ */
 
 static void print(const char* s) {
-    while (*s) putchar(*s++);
+    while (*s)
+        putchar(*s++);
 }
 
 void retroput(const char* fmt, ...) {
@@ -155,15 +217,21 @@ void retroput(const char* fmt, ...) {
             continue;
         }
         fmt++;
-        if (*fmt == 's') print(va_arg(args, char*));
-        else if (*fmt == 'c') putchar(va_arg(args, int));
+
+        if (*fmt == 's')
+            print(va_arg(args, char*));
+        else if (*fmt == 'c')
+            putchar(va_arg(args, int));
     }
 
     va_end(args);
 }
 
-/* ---------- helpers ---------- */
+/*
+ *  SMALL HELPERS
+ */
 
+// simple string equality check (good enough for shell)
 int streq(const char* a, const char* b) {
     while (*a && *b) {
         if (*a != *b) return 0;
@@ -172,6 +240,7 @@ int streq(const char* a, const char* b) {
     return *a == 0 && *b == 0;
 }
 
+// clears only the console area, logo survives
 void clear_screen(void) {
     for (int y = SCROLL_START; y < VGA_HEIGHT; y++)
         for (int x = 0; x < VGA_WIDTH; x++)
@@ -182,10 +251,14 @@ void clear_screen(void) {
     col = 0;
 }
 
-/* ---------- shell ---------- */
+/*
+ *  SHELL COMMAND HANDLER
+ * ============================
+ * Very small shell, very proud.
+ */
 
 void handle_command(void) {
-    cmd_buf[cmd_len] = 0;
+    cmd_buf[cmd_len] = 0; // null-terminate input
 
     if (cmd_len == 0) {
         print_prompt();
@@ -206,7 +279,13 @@ void handle_command(void) {
     print_prompt();
 }
 
-/* ---------- logo ---------- */
+/*
+
+*  LOGO
+ * ============================
+ * Because every OS needs
+ * a dramatic entrance.
+ */
 
 const char* logo =
 "                    >=>                          >===>        >=>>=>   \n"
@@ -217,16 +296,22 @@ const char* logo =
 " >=>    >>          >=>    >=>     >=>  >=>    >=>     >=>  >=>    >=> \n"
 ">==>     >====>      >=>  >==>       >=>         >===>        >=>>=>   \n";
 
-/* ---------- kernel ---------- */
+/*
+ * ============================
+ *  KERNEL ENTRY POINT
+ * ============================
+ * This is where everything
+ * starts feeling real.
+ */
 
 void kernel_main(void) {
     row = 0;
     col = 0;
 
-    set_color(0xE, 0x0);
+    set_color(0xE, 0x0); // yellow logo, because why not
     retroput("%s", logo);
 
-    /* CLEAR scroll region ONCE (IMPORTANT FIX) */
+    // clear console area ONCE so old garbage doesn’t leak in
     for (int y = SCROLL_START; y < VGA_HEIGHT; y++)
         for (int x = 0; x < VGA_WIDTH; x++)
             VGA[y * VGA_WIDTH + x] =
@@ -235,11 +320,13 @@ void kernel_main(void) {
     row = SCROLL_START;
     col = 0;
 
+    // interrupts online, keyboard wakes up
     idt_init();
     __asm__ volatile ("sti");
 
     print_prompt();
 
+    // nothing else to do, just vibe forever
     while (1)
         __asm__ volatile ("hlt");
 }
